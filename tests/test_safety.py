@@ -13,6 +13,13 @@ from meta_ads_mcp.core.lifecycle import delete_campaign, bulk_update_status
 from meta_ads_mcp.core.catalogs import delete_product_set
 
 
+def parse(result):
+    data = json.loads(result)
+    if "data" in data and isinstance(data["data"], str):
+        return json.loads(data["data"])
+    return data
+
+
 def _mock_response(payload=None):
     response = MagicMock()
     response.status_code = 200
@@ -99,7 +106,7 @@ async def test_audit_log_writes_redacted_line(mock_httpx, monkeypatch, tmp_path)
 
 @pytest.mark.asyncio
 async def test_delete_requires_confirm():
-    result = json.loads(await delete_campaign(campaign_id="123", access_token="tok"))
+    result = parse(await delete_campaign(campaign_id="123", access_token="tok"))
     assert result["error"]["code"] == "confirm_required"
 
 
@@ -107,7 +114,7 @@ async def test_delete_requires_confirm():
 async def test_delete_with_confirm_calls_api():
     with patch("meta_ads_mcp.core.lifecycle.make_api_request", new_callable=AsyncMock) as mock_api:
         mock_api.return_value = {"success": True}
-        result = json.loads(await delete_campaign(campaign_id="123", confirm=True, access_token="tok"))
+        result = parse(await delete_campaign(campaign_id="123", confirm=True, access_token="tok"))
         assert result["success"] is True
         mock_api.assert_called_once()
         assert mock_api.call_args[1]["method"] == "DELETE" or mock_api.call_args[0][3] == "DELETE" or (
@@ -117,13 +124,13 @@ async def test_delete_with_confirm_calls_api():
 
 @pytest.mark.asyncio
 async def test_delete_product_set_requires_confirm():
-    result = json.loads(await delete_product_set(product_set_id="ps1", access_token="tok"))
+    result = parse(await delete_product_set(product_set_id="ps1", access_token="tok"))
     assert result["error"]["code"] == "confirm_required"
 
 
 @pytest.mark.asyncio
 async def test_bulk_deleted_requires_confirm():
-    result = json.loads(await bulk_update_status(
+    result = parse(await bulk_update_status(
         object_ids=["1", "2"], status="DELETED", access_token="tok"
     ))
     assert result["error"]["code"] == "confirm_required"
