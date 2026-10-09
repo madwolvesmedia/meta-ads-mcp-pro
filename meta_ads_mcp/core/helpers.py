@@ -3,10 +3,15 @@
 import json
 from typing import Any, Dict, List, Optional, Union
 
+from .api import annotate_unapproved_api_error, sanitize_graph_payload
+
 
 def dump(data: Any) -> str:
-    """Serialize a tool response as indented JSON."""
-    return json.dumps(data, indent=2)
+    """Serialize a tool response as indented JSON with credentials stripped."""
+    return json.dumps(
+        annotate_unapproved_api_error(sanitize_graph_payload(data)),
+        indent=2,
+    )
 
 
 def error(message: str, **extra: Any) -> str:

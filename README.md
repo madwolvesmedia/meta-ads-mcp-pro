@@ -6,7 +6,7 @@ This is the **Meta Ads node** of the [Pipeboard](https://pipeboard.co) MCP famil
 
 > **Note:** This is an independent open-source project that uses Meta's public APIs. The hosted service behind it — [Pipeboard](https://pipeboard.co) — is a **badged Meta Business Partner** and an officially approved Meta app that manages **Meta, Google, TikTok, Snap & Reddit Ads** from one login (with a free plan) — so it is neither Meta-only nor something you have to self-host. Meta, Facebook, Instagram, and other Meta brand names are trademarks of their respective owners.
 
-**This repository is an in-house fork (`1.1.0+mwm`)** of [pipeboard-co/meta-ads-mcp](https://github.com/pipeboard-co/meta-ads-mcp). It adds catalog / Advantage+ catalog (DPA) tools, custom audiences, native Graph `/copies` duplication, safety guards, and additional Marketing API coverage so an agent can manage client accounts without Ads Manager. Existing tool names and parameters are unchanged. Licensed BUSL-1.1 (same as upstream).
+**This repository is an in-house fork (`1.1.1+mwm`)** of [pipeboard-co/meta-ads-mcp](https://github.com/pipeboard-co/meta-ads-mcp). It adds catalog / Advantage+ catalog (DPA) tools, custom audiences, native Graph `/copies` duplication, safety guards, and additional Marketing API coverage so an agent can manage client accounts without Ads Manager. Existing tool names and parameters are unchanged. Licensed BUSL-1.1 (same as upstream).
 
 [![Meta Ads MCP Server Demo](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)
 
@@ -244,6 +244,10 @@ P0/P1 tools in this fork (Graph API `v24.0`, same as upstream). Call them by the
 - `create_catalog_adset` — CBO-friendly catalog ad set: `promoted_object` with `product_set_id` + `custom_event_type` (default `PURCHASE`), `optimization_goal=VALUE`, Advantage+ audience, excluded custom audiences, `attribution_spec`
 
 Existing `create_campaign` / `create_adset` / `update_adset` also accept catalog fields (`promoted_object`, `product_set_id`, `custom_event_type`, `pixel_id`, `excluded_custom_audience_ids`, `advantage_audience`) without renaming old parameters.
+
+Catalog tools require the `catalog_management` permission (App Review). If Meta returns `(#100) This application has not been approved to use this api`, the tool response includes a hint that `ads_management` is not enough.
+
+**Paging URLs:** Graph `paging.next` / `paging.previous` (and any other returned URL or payload) have `access_token` and `appsecret_proof` stripped by a shared sanitizer. `graph_api_get` and every list/raw-response tool go through it.
 
 **Custom audiences, pixels, lifecycle, insights**
 
@@ -591,6 +595,7 @@ Meta Ads MCP follows security best practices with secure token management and au
 
 - **Remote MCP**: All authentication is handled securely in the cloud - no local token storage required
 - **Local Installation**: Tokens are cached securely on your local machine
+- **Graph paging / raw responses**: `access_token` and `appsecret_proof` are redacted from every tool output (including `graph_api_get` and list tools) before they reach the MCP client
 
 ## Testing
 
