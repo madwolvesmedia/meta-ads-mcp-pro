@@ -22,14 +22,80 @@ _TEMPLATE_FIELDS = (
 
 # Ads Manager catalog ads auto-switch carousel <-> collection.
 _FORMAT_AUTOMATION = frozenset({"auto", "automatic", "carousel_collection", "format_automation"})
+
+# Ads Manager "Advantage+ creative" bundle for catalog ads.
+# Do not POST the legacy `standard_enhancements` key (Meta error 3858504);
+# catalog creatives use `standard_enhancements_catalog` instead.
 _CATALOG_ENHANCEMENTS = {
-    "standard_enhancements": {"enroll_status": "OPT_IN"},
+    "standard_enhancements_catalog": {"enroll_status": "OPT_IN"},
     "image_enhancement": {"enroll_status": "OPT_IN"},
     "image_uncrop": {"enroll_status": "OPT_IN"},
     "text_optimizations": {"enroll_status": "OPT_IN"},
     "enhance_cta": {"enroll_status": "OPT_IN"},
     "video_auto_crop": {"enroll_status": "OPT_IN"},
 }
+
+_TEMPLATE_DATA_KEYS = ("link", "message", "name", "description", "call_to_action")
+
+
+def _template_text(template: Dict[str, Any], key: str, fallback: str) -> str:
+    value = template.get(key) if isinstance(template, dict) else None
+    if value is None or value == "":
+        return fallback
+    return str(value)
+
+
+def _cta_type_from_template(template: Dict[str, Any], fallback: str) -> str:
+    cta = template.get("call_to_action") if isinstance(template, dict) else None
+    if isinstance(cta, dict) and cta.get("type"):
+        return str(cta["type"])
+    return fallback
+
+
+def _asset_feed_copy_from_template(
+    template: Dict[str, Any],
+    *,
+    message: str,
+    headline: str,
+    description: str,
+    link: str,
+    call_to_action_type: str,
+) -> Dict[str, Any]:
+    """Shape Meta reads for format automation: titles/descriptions/bodies, not template_data."""
+    title = _template_text(template, "name", headline)
+    desc = _template_text(template, "description", description)
+    body = _template_text(template, "message", message)
+    url = _template_text(template, "link", link)
+    cta = _cta_type_from_template(template, call_to_action_type)
+    feed: Dict[str, Any] = {}
+    if body:
+        feed["bodies"] = [{"text": body}]
+    if title:
+        feed["titles"] = [{"text": title}]
+    if desc:
+        feed["descriptions"] = [{"text": desc}]
+    if url:
+        feed["link_urls"] = [{"website_url": url}]
+    if cta:
+        feed["call_to_action_types"] = [cta]
+    return feed
+
+
+def _merge_template_defaults(story: Dict[str, Any], built: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure template_data keeps name/description/message even if a partial override is passed."""
+    existing = story.get("template_data")
+    if not isinstance(existing, dict):
+        story["template_data"] = dict(built)
+        return story["template_data"]
+    for key in _TEMPLATE_DATA_KEYS:
+        if key not in existing or existing.get(key) in (None, ""):
+            if key in built:
+                existing[key] = built[key]
+    if "multi_share_end_card" not in existing and "multi_share_end_card" in built:
+        existing["multi_share_end_card"] = built["multi_share_end_card"]
+    if "force_single_link" in built and "force_single_link" not in existing:
+        existing["force_single_link"] = built["force_single_link"]
+    return existing
 
 
 @mcp_server.tool()
@@ -60,11 +126,16 @@ async def create_catalog_ad_creative(
     asset_feed_spec: Optional[Dict[str, Any]] = None,
     degrees_of_freedom_spec: Optional[Dict[str, Any]] = None,
     enable_enhancements: bool = False,
+    standard_enhancements_catalog: Optional[bool] = None,
 ) -> str:
     """Create a Advantage+ catalog / DPA ad creative (carousel, single, collection, or auto).
 
-    Uses product_set_id plus object_story_spec.template_data so Meta fills cards from
-    the catalog. Template placeholders include {{product.name}}, {{product.price}},
+    Copy (message / headline / description) is sent in both shapes Meta reads:
+      - object_story_spec.template_data: message, name (title), description
+      - asset_feed_spec (format=auto, collection, or a caller-supplied feed):
+        bodies, titles, descriptions, link_urls, call_to_action_types
+
+    Template placeholders include {{product.name}}, {{product.price}},
     {{product.description}}, {{product.brand}}, {{product.url}}.
 
     Formats:
@@ -74,6 +145,11 @@ async def create_catalog_ad_creative(
       - auto: Ads Manager-style format automation (carousel + collection switching
         via asset_feed_spec.ad_formats CAROUSEL, COLLECTION)
 
+    Enhancements default off (enable_enhancements=false). Pass
+    enable_enhancements=true to match Ads Manager Advantage+ creative for catalog
+    (standard_enhancements_catalog plus image/text/CTA/video opts). Or set
+    standard_enhancements_catalog=true/false on its own.
+
     Args:
         account_id: Ad account ID (act_XXXXXXXXX)
         product_set_id: Product set to advertise
@@ -82,8 +158,9 @@ async def create_catalog_ad_creative(
         access_token: Meta API access token (optional)
         name: Creative name
         message: Primary text (may include {{product.*}} templates)
-        headline: Card title / name template
-        description: Card description template
+        headline: Card title / name template (template_data.name and asset_feed_spec.titles)
+        description: Card description template (template_data.description and
+            asset_feed_spec.descriptions). Default {{product.price}}.
         call_to_action_type: CTA enum (SHOP_NOW, LEARN_MORE, BUY_NOW, ...)
         format: carousel | single | collection | auto (carousel+collection switching)
         url_tags: Tracking query string appended to product links
@@ -101,9 +178,12 @@ async def create_catalog_ad_creative(
         collection_hero_image_hash: Hero image hash for collection format
         asset_feed_spec: Full asset_feed_spec override / merge (ad_formats, images, ...)
         degrees_of_freedom_spec: Full degrees_of_freedom_spec override
-        enable_enhancements: Opt in to standard catalog creative enhancements
-            (standard_enhancements, image_enhancement, image_uncrop, text_optimizations,
-            enhance_cta, video_auto_crop) via degrees_of_freedom_spec
+        enable_enhancements: Default false. True = Ads Manager catalog bundle
+            (standard_enhancements_catalog, image_enhancement, image_uncrop,
+            text_optimizations, enhance_cta, video_auto_crop).
+        standard_enhancements_catalog: Explicit OPT_IN (true) / OPT_OUT (false)
+            for the catalog standard-enhancements flag. Overrides the bundle
+            when set. None = follow enable_enhancements.
     """
     if not account_id:
         return error("No account ID provided")
@@ -141,8 +221,7 @@ async def create_catalog_ad_creative(
         story.setdefault("page_id", str(page_id))
         if ig_id and "instagram_user_id" not in story:
             story["instagram_user_id"] = str(ig_id)
-        if "template_data" not in story:
-            story["template_data"] = built_template
+        _merge_template_defaults(story, built_template)
 
     params: Dict[str, Any] = {
         "name": name or f"Catalog creative {product_set_id}",
@@ -165,6 +244,10 @@ async def create_catalog_ad_creative(
         }
         for key, value in defaults.items():
             features.setdefault(key, value)
+    if standard_enhancements_catalog is True:
+        features["standard_enhancements_catalog"] = {"enroll_status": "OPT_IN"}
+    elif standard_enhancements_catalog is False:
+        features["standard_enhancements_catalog"] = {"enroll_status": "OPT_OUT"}
 
     dof = parse_jsonish(degrees_of_freedom_spec) if degrees_of_freedom_spec else None
     if isinstance(dof, dict):
@@ -200,7 +283,17 @@ async def create_catalog_ad_creative(
         feed = {**(feed or {}), **extra_feed}
         if collection_hero_image_hash and "images" not in feed:
             feed["images"] = [{"hash": collection_hero_image_hash}]
-    if feed:
+    if feed is not None:
+        copy_fields = _asset_feed_copy_from_template(
+            story.get("template_data") if isinstance(story.get("template_data"), dict) else built_template,
+            message=message,
+            headline=headline,
+            description=description,
+            link=link,
+            call_to_action_type=call_to_action_type,
+        )
+        for key, value in copy_fields.items():
+            feed.setdefault(key, value)
         params["asset_feed_spec"] = feed
 
     data = await make_api_request(

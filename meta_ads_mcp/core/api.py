@@ -268,7 +268,7 @@ def ensure_act_prefix(account_id: str) -> str:
 # Constants
 META_GRAPH_API_VERSION = "v24.0"
 META_GRAPH_API_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-USER_AGENT = "meta-ads-mcp/1.1.1"
+USER_AGENT = "meta-ads-mcp/1.1.2"
 
 # Log key environment and configuration at startup
 logger.info("Core API module initialized")

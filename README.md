@@ -6,7 +6,7 @@ This is the **Meta Ads node** of the [Pipeboard](https://pipeboard.co) MCP famil
 
 > **Note:** This is an independent open-source project that uses Meta's public APIs. The hosted service behind it — [Pipeboard](https://pipeboard.co) — is a **badged Meta Business Partner** and an officially approved Meta app that manages **Meta, Google, TikTok, Snap & Reddit Ads** from one login (with a free plan) — so it is neither Meta-only nor something you have to self-host. Meta, Facebook, Instagram, and other Meta brand names are trademarks of their respective owners.
 
-**This repository is an in-house fork (`1.1.1+mwm`)** of [pipeboard-co/meta-ads-mcp](https://github.com/pipeboard-co/meta-ads-mcp). It adds catalog / Advantage+ catalog (DPA) tools, custom audiences, native Graph `/copies` duplication, safety guards, and additional Marketing API coverage so an agent can manage client accounts without Ads Manager. Existing tool names and parameters are unchanged. Licensed BUSL-1.1 (same as upstream).
+**This repository is an in-house fork (`1.1.2+mwm`)** of [pipeboard-co/meta-ads-mcp](https://github.com/pipeboard-co/meta-ads-mcp). It adds catalog / Advantage+ catalog (DPA) tools, custom audiences, native Graph `/copies` duplication, safety guards, and additional Marketing API coverage so an agent can manage client accounts without Ads Manager. Existing tool names and parameters are unchanged. Licensed BUSL-1.1 (same as upstream).
 
 [![Meta Ads MCP Server Demo](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)
 
@@ -240,7 +240,7 @@ P0/P1 tools in this fork (Graph API `v24.0`, same as upstream). Call them by the
 - `list_catalog_products` — catalog or set products (optional `filter_rules`, `retailer_id`)
 - `list_product_feeds` / `get_product_feed` / `get_feed_upload_status`
 - `get_catalog_diagnostics` — diagnostics + event stats
-- `create_catalog_ad_creative` — `product_set_id` + `template_data` (`{{product.name}}`, `{{product.price}}`, …); `format`: carousel / single / collection / auto (carousel+collection switching via `asset_feed_spec`); `enable_enhancements` / `degrees_of_freedom_spec` creative enhancements; CTA, `url_tags`
+- `create_catalog_ad_creative` — `product_set_id` + copy in both `template_data` (`name`/`description`/`message`) and `asset_feed_spec` (`titles`/`descriptions`/`bodies`) so `format=auto` stores `{{product.price}}`; `format`: carousel / single / collection / auto; enhancements default **off** — `enable_enhancements=true` matches Ads Manager (includes `standard_enhancements_catalog`), or set `standard_enhancements_catalog` alone; CTA, `url_tags`
 - `create_catalog_adset` — CBO-friendly catalog ad set: `promoted_object` with `product_set_id` + `custom_event_type` (default `PURCHASE`), `optimization_goal=VALUE`, Advantage+ audience, excluded custom audiences, `attribution_spec`
 
 Existing `create_campaign` / `create_adset` / `update_adset` also accept catalog fields (`promoted_object`, `product_set_id`, `custom_event_type`, `pixel_id`, `excluded_custom_audience_ids`, `advantage_audience`) without renaming old parameters.
