@@ -3,6 +3,7 @@
 import json
 from typing import Optional, Dict, Any
 from .api import meta_api_tool, make_api_request, ensure_act_prefix
+from .helpers import dump
 from .server import mcp_server
 
 # Currencies that have no sub-units (i.e., are not denominated in cents).
@@ -64,7 +65,7 @@ async def get_ad_accounts(access_token: Optional[str] = None, user_id: str = "me
     if "data" in data:
         data["data"] = [_normalize_account_monetary_fields(acc) for acc in data["data"]]
 
-    return json.dumps(data, indent=2)
+    return dump(data)
 
 
 _DEFAULT_ACCOUNT_INFO_FIELDS = (

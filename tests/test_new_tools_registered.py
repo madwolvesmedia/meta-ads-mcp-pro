@@ -20,6 +20,7 @@ async def test_catalog_and_safety_tools_are_registered():
         "create_catalog_adset",
         "list_custom_audiences",
         "create_lookalike_audience",
+        "create_product_audience",
         "upload_custom_audience_users",
         "list_pixels",
         "create_custom_conversion",

@@ -4,6 +4,7 @@ import json
 from typing import Optional, Dict, Any, List
 from .api import meta_api_tool, make_api_request, ensure_act_prefix
 from .accounts import get_ad_accounts
+from .helpers import dump
 from .server import mcp_server
 
 
@@ -43,8 +44,8 @@ async def get_adsets(account_id: str, access_token: Optional[str] = None, limit:
         # as it was ineffective and the logic now uses the correct endpoint for campaign filtering.
 
     data = await make_api_request(endpoint, access_token, params)
-    
-    return json.dumps(data, indent=2)
+
+    return dump(data)
 
 
 @mcp_server.tool()

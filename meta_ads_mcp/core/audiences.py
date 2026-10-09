@@ -31,6 +31,83 @@ _HASH_FIELDS = frozenset({
 })
 _SKIP_HASH_FIELDS = frozenset({"LOOKALIKE_VALUE"})
 
+# Current Graph API rejects `subtype` on pixel / website audiences.
+# Only send it when Meta still requires the field (customer-list CUSTOM,
+# LOOKALIKE, CLAIM, ENGAGEMENT, VIDEO, ...).
+_WEBSITE_SUBTYPES = frozenset({"", "WEBSITE", "SITE"})
+
+
+def _subtype_for_create(
+    subtype: Optional[str],
+    *,
+    pixel_id: Optional[str] = None,
+    rule: Any = None,
+    lookalike_spec: Any = None,
+    origin_audience_id: Optional[str] = None,
+    customer_file_source: Optional[str] = None,
+    claim_objective: Optional[str] = None,
+) -> Optional[str]:
+    """Return the subtype to send, or None to omit the field."""
+    explicit = (subtype or "").strip().upper() or None
+
+    if lookalike_spec or origin_audience_id or explicit == "LOOKALIKE":
+        return "LOOKALIKE"
+
+    websiteish = bool(pixel_id or rule) and not claim_objective
+    if websiteish and (explicit is None or explicit in _WEBSITE_SUBTYPES or explicit == "CUSTOM"):
+        return None
+    if explicit in _WEBSITE_SUBTYPES and explicit is not None:
+        return None
+
+    if claim_objective or explicit == "CLAIM":
+        return explicit or "CLAIM"
+    if customer_file_source or explicit == "CUSTOM":
+        return "CUSTOM"
+    if explicit:
+        return explicit
+    return "CUSTOM"
+
+
+def _product_audience_clauses(
+    items: Any,
+    default_days: int = 14,
+) -> List[Dict[str, Any]]:
+    """Normalize inclusions/exclusions to Meta product_audiences clauses.
+
+    Accepts either Graph's `{retention_seconds, rule}` or the convenience
+    shape `{event: "ViewContent"|"AddToCart"|"Purchase", retention_days: N}`.
+    """
+    parsed = parse_jsonish(items) if items else None
+    if not parsed:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    clauses: List[Dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        if "rule" in item:
+            entry = dict(item)
+            if "retention_seconds" not in entry:
+                days = entry.pop("retention_days", default_days)
+                entry["retention_seconds"] = int(days) * 86400
+            clauses.append(entry)
+            continue
+        event = item.get("event") or item.get("retention")
+        if not event:
+            continue
+        seconds = item.get("retention_seconds")
+        if seconds is None:
+            days = item.get("retention_days", default_days)
+            seconds = int(days) * 86400
+        clauses.append({
+            "retention_seconds": int(seconds),
+            "rule": {"event": {"eq": str(event)}},
+        })
+    return clauses
+
 
 def _is_sha256_hex(value: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-fA-F]{64}", value or ""))
@@ -145,7 +222,7 @@ async def create_custom_audience(
     account_id: str,
     name: str,
     access_token: Optional[str] = None,
-    subtype: str = "CUSTOM",
+    subtype: Optional[str] = None,
     description: Optional[str] = None,
     pixel_id: Optional[str] = None,
     retention_days: Optional[int] = None,
@@ -164,15 +241,16 @@ async def create_custom_audience(
 
     Common patterns:
 
-    Website / pixel (visitors in last 30 days)::
+    Website / pixel (visitors in last 30 days) — do **not** send subtype;
+    Graph currently rejects it for pixel audiences::
 
-        subtype="WEBSITE", pixel_id="<pixel>", retention_days=30,
+        pixel_id="<pixel>", retention_days=30,
         rule={"inclusions": {"operator": "or", "rules": [{
             "event_sources": [{"id": "<pixel>", "type": "pixel"}],
             "retention_seconds": 2592000
         }]}}
 
-    Catalog / product engagement::
+    Catalog / product engagement (or use create_product_audience)::
 
         subtype="CLAIM", claim_objective="PRODUCT", content_type="PRODUCT",
         product_set_id="<set>"
@@ -190,7 +268,9 @@ async def create_custom_audience(
         account_id: Ad account ID
         name: Audience name
         access_token: Meta API access token (optional)
-        subtype: CUSTOM, WEBSITE, ENGAGEMENT, LOOKALIKE, CLAIM, VIDEO, ...
+        subtype: Only sent when required. CUSTOM (customer list), LOOKALIKE,
+            CLAIM, ENGAGEMENT, VIDEO, ... Omit for pixel/website audiences
+            (Graph rejects subtype=WEBSITE / default CUSTOM on those).
         description: Optional description
         pixel_id: Pixel / dataset ID for website audiences
         retention_days: Retention window in days (website audiences)
@@ -211,7 +291,18 @@ async def create_custom_audience(
         return error("No audience name provided")
     account_id = ensure_act_prefix(account_id)
 
-    params: Dict[str, Any] = {"name": name, "subtype": subtype}
+    params: Dict[str, Any] = {"name": name}
+    resolved_subtype = _subtype_for_create(
+        subtype,
+        pixel_id=pixel_id,
+        rule=rule,
+        lookalike_spec=lookalike_spec,
+        origin_audience_id=origin_audience_id,
+        customer_file_source=customer_file_source,
+        claim_objective=claim_objective,
+    )
+    if resolved_subtype:
+        params["subtype"] = resolved_subtype
     if description:
         params["description"] = description
     if pixel_id:
@@ -240,6 +331,16 @@ async def create_custom_audience(
         params["origin_audience_id"] = str(origin_audience_id)
     extra = parse_jsonish(extra_params) if extra_params else None
     if isinstance(extra, dict):
+        extra = dict(extra)
+        extra_sub = str(extra.get("subtype", "")).strip().upper()
+        if extra_sub in _WEBSITE_SUBTYPES or (
+            extra_sub in {"CUSTOM", "WEBSITE"}
+            and (pixel_id or rule)
+            and not claim_objective
+            and not lookalike
+            and not origin_audience_id
+        ):
+            extra.pop("subtype", None)
         params.update(extra)
 
     data = await make_api_request(
@@ -432,6 +533,110 @@ async def create_lookalike_audience(
         params["description"] = description
     data = await make_api_request(
         f"{account_id}/customaudiences", access_token, params, method="POST"
+    )
+    return dump(data)
+
+
+@mcp_server.tool()
+@meta_api_tool
+async def create_product_audience(
+    account_id: str,
+    name: str,
+    product_set_id: str,
+    access_token: Optional[str] = None,
+    inclusions: Optional[Union[List[Dict[str, Any]], Dict[str, Any], str]] = None,
+    exclusions: Optional[Union[List[Dict[str, Any]], Dict[str, Any], str]] = None,
+    description: Optional[str] = None,
+    prefill: Optional[bool] = None,
+    view_content_days: Optional[int] = None,
+    add_to_cart_days: Optional[int] = None,
+    purchase_days: Optional[int] = None,
+    exclude_purchase_days: Optional[int] = None,
+    extra_params: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Create a catalog / product audience (`POST /act_X/product_audiences`).
+
+    Inclusions and exclusions use pixel events (ViewContent, AddToCart, Purchase,
+    InitiateCheckout, Search, ...) with a retention window. Convenience days
+    arguments are merged into inclusions/exclusions.
+
+    Example (viewed or added to cart in 14 days, excluding purchasers in 7 days)::
+
+        create_product_audience(
+            account_id, name, product_set_id,
+            view_content_days=14, add_to_cart_days=14, exclude_purchase_days=7,
+        )
+
+    Or explicit clauses::
+
+        inclusions=[{"event": "ViewContent", "retention_days": 14},
+                    {"event": "AddToCart", "retention_days": 14}]
+        exclusions=[{"event": "Purchase", "retention_days": 7}]
+
+    Args:
+        account_id: Ad account ID
+        name: Audience name
+        product_set_id: Catalog product set ID
+        access_token: Meta API access token (optional)
+        inclusions: Event clauses to include (convenience `{event, retention_days}`
+            or Graph `{retention_seconds, rule}`)
+        exclusions: Event clauses to exclude
+        description: Optional description
+        prefill: Include historical matching events
+        view_content_days: Shortcut inclusion for ViewContent
+        add_to_cart_days: Shortcut inclusion for AddToCart
+        purchase_days: Shortcut inclusion for Purchase
+        exclude_purchase_days: Shortcut exclusion for Purchase
+        extra_params: Extra Graph fields passed through
+    """
+    if not account_id:
+        return error("No account ID provided")
+    if not name:
+        return error("No audience name provided")
+    if not product_set_id:
+        return error("No product_set_id provided")
+    account_id = ensure_act_prefix(account_id)
+
+    include_clauses = _product_audience_clauses(inclusions)
+    exclude_clauses = _product_audience_clauses(exclusions)
+
+    def _add_event(target: List[Dict[str, Any]], event: str, days: Optional[int]) -> None:
+        if days is None:
+            return
+        target.append({
+            "retention_seconds": int(days) * 86400,
+            "rule": {"event": {"eq": event}},
+        })
+
+    _add_event(include_clauses, "ViewContent", view_content_days)
+    _add_event(include_clauses, "AddToCart", add_to_cart_days)
+    _add_event(include_clauses, "Purchase", purchase_days)
+    _add_event(exclude_clauses, "Purchase", exclude_purchase_days)
+
+    if not include_clauses:
+        return error(
+            "Provide inclusions or view_content_days / add_to_cart_days / purchase_days",
+            details="Product audiences need at least one inclusion event "
+            "(typically ViewContent and/or AddToCart) with a retention window.",
+        )
+
+    params: Dict[str, Any] = {
+        "name": name,
+        "product_set_id": str(product_set_id),
+        "inclusions": include_clauses,
+    }
+    if exclude_clauses:
+        params["exclusions"] = exclude_clauses
+    if description:
+        params["description"] = description
+    if prefill is not None:
+        params["prefill"] = "true" if prefill else "false"
+    extra = parse_jsonish(extra_params) if extra_params else None
+    if isinstance(extra, dict):
+        params.update(extra)
+
+    data = await make_api_request(
+        f"{account_id}/product_audiences", access_token, params, method="POST"
     )
     return dump(data)
 

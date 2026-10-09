@@ -1,6 +1,6 @@
 """Core API functionality for Meta Ads API."""
 
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Iterable, List, Optional, Callable
 import json
 import hmac
 import hashlib
@@ -8,6 +8,7 @@ import httpx
 import asyncio
 import functools
 import os
+import re
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from . import auth
 from .auth import needs_authentication, auth_manager, start_callback_server, shutdown_callback_server
@@ -15,18 +16,53 @@ from .utils import logger
 from . import safety
 
 
-# Query-string params that must never leak to the caller in error payloads.
+# Query-string / JSON keys that must never leak to MCP callers.
 # access_token is the operator credential; appsecret_proof is derived from
 # the app secret + access token via HMAC and is similarly sensitive.
-# See GHSA-9gw6-46qc-99vr.
+# See GHSA-9gw6-46qc-99vr. Graph paging.next/previous URLs embed these params
+# on every list response; sanitize_graph_payload strips them everywhere.
 _SENSITIVE_QUERY_PARAMS = frozenset({"access_token", "appsecret_proof"})
+_REDACTED = "REDACTED"
+
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(?i)(?P<key>access_token|appsecret_proof)=(?P<val>[^&\s\"'<>\\]*)"
+)
+_SENSITIVE_JSON_RE = re.compile(
+    r'(?i)"(?P<key>access_token|appsecret_proof)"\s*:\s*"(?P<val>[^"]*)"'
+)
+_SENSITIVE_URLENC_RE = re.compile(
+    r"(?i)(?P<key>access_token|appsecret_proof)%3D(?P<val>[^&%\s\"']+)"
+)
+
+# Meta (#100) when the app has not been approved for a product API. Catalog /
+# DPA tools hit this when catalog_management is missing from the app or token.
+_UNAPPROVED_API_SNIPPET = "has not been approved to use this api"
+_CATALOG_MANAGEMENT_HINT = (
+    "Meta returned (#100) 'This application has not been approved to use this api'. "
+    "For product catalogs, product sets, feeds, and catalog ads this means the app is "
+    "missing the catalog_management permission (App Review). ads_management alone is "
+    "not sufficient. Grant catalog_management to the app and to the system user whose "
+    "token you use. Other Graph edges can return the same error when a different "
+    "feature permission is missing."
+)
+
+# Subcode 1885183: object created while the Meta app is in Development mode.
+_DEV_MODE_SUBCODE = 1885183
+_DEV_MODE_SNIPPET = "in development mode"
+_DEV_MODE_HINT = (
+    "Meta returned error subcode 1885183: this object was created by an app that is "
+    "in Development mode. Switch the Meta app to Live in the App Dashboard "
+    "(App settings → App mode / publish live) before using it to create ads, "
+    "audiences, or catalog objects in a real ad account. Development-mode apps "
+    "can only be used by people listed as app admins, developers, or testers."
+)
 
 
 def _redact_url(url: str) -> str:
     """Strip sensitive query params (access_token, appsecret_proof) from a URL.
 
-    Used to scrub Graph API URLs before they are returned to MCP callers in
-    error responses.
+    Used to scrub Graph API URLs (paging.next/previous, error request URLs)
+    before they are returned to MCP callers.
     """
     if not url:
         return url
@@ -35,13 +71,181 @@ def _redact_url(url: str) -> str:
         if not parts.query:
             return url
         scrubbed = [
-            (k, "REDACTED" if k in _SENSITIVE_QUERY_PARAMS else v)
+            (k, _REDACTED if k in _SENSITIVE_QUERY_PARAMS else v)
             for k, v in parse_qsl(parts.query, keep_blank_values=True)
         ]
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(scrubbed), parts.fragment))
     except Exception:
         # Be conservative: if parsing fails, drop the query string entirely.
         return url.split("?", 1)[0]
+
+
+def _unique_secrets(secrets: Optional[Iterable[str]] = None) -> List[str]:
+    """Longest-first unique secrets, ignoring blanks and tiny strings."""
+    seen = set()
+    out: List[str] = []
+    for secret in secrets or []:
+        if not isinstance(secret, str) or len(secret) < 8:
+            continue
+        if secret not in seen:
+            seen.add(secret)
+            out.append(secret)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def _redact_sensitive_in_string(value: str, secrets: Optional[Iterable[str]] = None) -> str:
+    """Redact tokens from URLs, query strings, JSON text, and known secret values."""
+    if not value or not isinstance(value, str):
+        return value
+    if value.startswith("http://") or value.startswith("https://"):
+        value = _redact_url(value)
+    if "access_token" in value or "appsecret_proof" in value:
+        value = _SENSITIVE_QUERY_RE.sub(lambda m: f"{m.group('key')}=REDACTED", value)
+        value = _SENSITIVE_JSON_RE.sub(lambda m: f'"{m.group("key")}": "REDACTED"', value)
+        value = _SENSITIVE_URLENC_RE.sub(lambda m: f"{m.group('key')}%3DREDACTED", value)
+    for secret in _unique_secrets(secrets):
+        if secret in value:
+            value = value.replace(secret, _REDACTED)
+    return value
+
+
+def sanitize_graph_payload(data: Any, secrets: Optional[Iterable[str]] = None) -> Any:
+    """Recursively strip access_token and appsecret_proof from Graph payloads.
+
+    Covers paging.next/previous URLs, nested field-expansion paging, dict keys,
+    JSON-in-string bodies, and leftover copies of known secrets. Idempotent.
+    """
+    secret_list = _unique_secrets(secrets)
+    if isinstance(data, dict):
+        out: Dict[str, Any] = {}
+        for key, value in data.items():
+            if key in _SENSITIVE_QUERY_PARAMS:
+                out[key] = _REDACTED
+            else:
+                out[key] = sanitize_graph_payload(value, secret_list)
+        return out
+    if isinstance(data, list):
+        return [sanitize_graph_payload(item, secret_list) for item in data]
+    if isinstance(data, tuple):
+        return [sanitize_graph_payload(item, secret_list) for item in data]
+    if isinstance(data, str):
+        return _redact_sensitive_in_string(data, secret_list)
+    return data
+
+
+def _is_unapproved_api_error_value(value: Any) -> bool:
+    """True when a Graph error value is the unapproved-API (#100) response."""
+    if isinstance(value, str):
+        return _UNAPPROVED_API_SNIPPET in value.lower()
+    if not isinstance(value, dict):
+        return False
+    message = str(value.get("message", "")).lower()
+    if _UNAPPROVED_API_SNIPPET in message:
+        return True
+    nested = value.get("error")
+    if nested is not None and nested is not value:
+        return _is_unapproved_api_error_value(nested)
+    return False
+
+
+def _contains_unapproved_api_error(data: Any) -> bool:
+    if isinstance(data, dict):
+        if _is_unapproved_api_error_value(data):
+            return True
+        return any(_contains_unapproved_api_error(v) for v in data.values())
+    if isinstance(data, list):
+        return any(_contains_unapproved_api_error(item) for item in data)
+    if isinstance(data, str):
+        return _UNAPPROVED_API_SNIPPET in data.lower()
+    return False
+
+
+def _add_hint(payload: Dict[str, Any], hint: str) -> Dict[str, Any]:
+    """Attach hint at the payload root and on a matching error object. Idempotent."""
+    out = dict(payload)
+    existing = out.get("hint")
+    if not existing:
+        out["hint"] = hint
+    elif hint not in str(existing):
+        out["hint"] = f"{existing} {hint}"
+    err = out.get("error")
+    if isinstance(err, dict):
+        err = dict(err)
+        err_existing = err.get("hint")
+        if not err_existing:
+            err["hint"] = hint
+        elif hint not in str(err_existing):
+            err["hint"] = f"{err_existing} {hint}"
+        out["error"] = err
+    return out
+
+
+def annotate_unapproved_api_error(payload: Any) -> Any:
+    """Attach a catalog_management hint when Meta returns the unapproved-API error.
+
+    Catalog / DPA tools (and graph_api_get against catalog edges) surface
+    '(#100) This application has not been approved to use this api' when the
+    app or token is missing catalog_management. The hint is added at the payload
+    root and on any matching error object. Idempotent.
+    """
+    if not isinstance(payload, dict) or not _contains_unapproved_api_error(payload):
+        return payload
+    return _add_hint(payload, _CATALOG_MANAGEMENT_HINT)
+
+
+def _is_development_mode_error_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return _DEV_MODE_SNIPPET in value.lower() or "1885183" in value
+    if not isinstance(value, dict):
+        return False
+    if value.get("error_subcode") == _DEV_MODE_SUBCODE or value.get("code") == _DEV_MODE_SUBCODE:
+        return True
+    blob = " ".join(
+        str(value.get(key, ""))
+        for key in ("message", "error_user_msg", "error_user_title", "error_subcode")
+    ).lower()
+    if _DEV_MODE_SNIPPET in blob:
+        return True
+    nested = value.get("error")
+    if nested is not None and nested is not value:
+        return _is_development_mode_error_value(nested)
+    details = value.get("details")
+    if details is not None and details is not value:
+        return _is_development_mode_error_value(details)
+    return False
+
+
+def _contains_development_mode_error(data: Any) -> bool:
+    if isinstance(data, dict):
+        if _is_development_mode_error_value(data):
+            return True
+        return any(_contains_development_mode_error(v) for v in data.values())
+    if isinstance(data, list):
+        return any(_contains_development_mode_error(item) for item in data)
+    if isinstance(data, str):
+        return _DEV_MODE_SNIPPET in data.lower() or "1885183" in data
+    return False
+
+
+def annotate_development_mode_error(payload: Any) -> Any:
+    """Attach a Live-app hint when Meta returns subcode 1885183 (development mode)."""
+    if not isinstance(payload, dict) or not _contains_development_mode_error(payload):
+        return payload
+    return _add_hint(payload, _DEV_MODE_HINT)
+
+
+def annotate_graph_errors(payload: Any) -> Any:
+    """Attach known Graph permission / app-mode hints. Idempotent."""
+    payload = annotate_unapproved_api_error(payload)
+    payload = annotate_development_mode_error(payload)
+    return payload
+
+
+def _safe_api_payload(payload: Any, secrets: Optional[Iterable[str]] = None) -> Any:
+    """Sanitize credentials then annotate known Graph permission errors."""
+    return annotate_graph_errors(sanitize_graph_payload(payload, secrets))
+
 
 class McpToolError(Exception):
     """Base class for MCP tool errors that must set isError: true.
@@ -64,7 +268,7 @@ def ensure_act_prefix(account_id: str) -> str:
 # Constants
 META_GRAPH_API_VERSION = "v24.0"
 META_GRAPH_API_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-USER_AGENT = "meta-ads-mcp/1.1.0"
+USER_AGENT = "meta-ads-mcp/1.1.1"
 
 # Log key environment and configuration at startup
 logger.info("Core API module initialized")
@@ -189,21 +393,21 @@ async def make_api_request(
     # Validate access token before proceeding
     if not access_token:
         logger.error("API request attempted with blank access token")
-        return {
+        return _safe_api_payload({
             "error": {
                 "message": "Authentication Required",
                 "details": "A valid access token is required to access the Meta API",
                 "action_required": "Please authenticate first"
             }
-        }
+        })
 
     is_mutation = mutation if mutation is not None else method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
     if is_mutation:
         if safety.is_read_only():
-            return safety.read_only_error()
+            return _safe_api_payload(safety.read_only_error())
         budget_error = safety.check_params_budget(params)
         if budget_error:
-            return budget_error
+            return _safe_api_payload(budget_error)
         safety.audit_write(method, endpoint, params)
 
     url = f"{META_GRAPH_API_BASE}/{endpoint.lstrip('/')}" if endpoint else META_GRAPH_API_BASE
@@ -231,6 +435,11 @@ async def make_api_request(
             access_token.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
+
+    secrets = [access_token]
+    proof = request_params.get("appsecret_proof")
+    if isinstance(proof, str) and proof:
+        secrets.append(proof)
 
     # Logging the request (masking token for security)
     masked_params = {k: "***MASKED***" if k in ("access_token", "appsecret_proof") else v for k, v in request_params.items()}
@@ -291,13 +500,13 @@ async def make_api_request(
 
             # Ensure the response is JSON and return it as a dictionary
             try:
-                return response.json()
+                return _safe_api_payload(response.json(), secrets)
             except json.JSONDecodeError:
                 # If not JSON, return text content in a structured format
-                return {
+                return _safe_api_payload({
                     "text_response": response.text,
                     "status_code": response.status_code
-                }
+                }, secrets)
         
         except httpx.HTTPStatusError as e:
             error_info = {}
@@ -343,13 +552,13 @@ async def make_api_request(
                     if error_code == 200 and "Provide valid app ID" in error_obj.get("message", ""):
                         logger.error("Meta API authentication configuration issue")
                         logger.error(f"Current app_id: {app_id}")
-                        return {
+                        return _safe_api_payload({
                             "error": {
                                 "message": "Meta API authentication configuration issue. Please check your app credentials.",
                                 "original_error": error_obj.get("message"),
                                 "code": error_code
                             }
-                        }
+                        }, secrets)
                     auth_manager.invalidate_token()
                 elif e.response.status_code in [401, 403]:
                     logger.warning(f"Detected authentication error ({e.response.status_code})")
@@ -381,11 +590,11 @@ async def make_api_request(
                     error_payload["error_code"] = error_code
                 if error_subcode is not None:
                     error_payload["error_subcode"] = error_subcode
-            return {"error": error_payload}
+            return _safe_api_payload({"error": error_payload}, secrets)
         
         except Exception as e:
             logger.error(f"Request Error: {str(e)}")
-            return {"error": {"message": str(e)}}
+            return _safe_api_payload({"error": {"message": str(e)}}, secrets)
 
 
 # Generic wrapper for all Meta API tools
@@ -482,16 +691,27 @@ def meta_api_tool(func):
                 
             # Call the original function
             result = await func(*args, **kwargs)
-            
+            secrets = [kwargs["access_token"]] if kwargs.get("access_token") else None
+
+            # FastMCP Image (and other non-JSON) responses must pass through.
+            if not isinstance(result, (str, dict, list)):
+                return result
+
             # If the result is a string (JSON), try to parse it to check for errors
             if isinstance(result, str):
                 try:
                     result_dict = json.loads(result)
+                except json.JSONDecodeError:
+                    return json.dumps({"data": _redact_sensitive_in_string(result, secrets)}, indent=2)
+
+                result_dict = _safe_api_payload(result_dict, secrets)
+                sanitized_str = json.dumps(result_dict, indent=2)
+                try:
                     if "error" in result_dict:
                         logger.error(f"Error in API response: {result_dict['error']}")
-                        # If this is an app ID error, log more details
-                        if isinstance(result_dict.get("details", {}).get("error", {}), dict):
-                            error_obj = result_dict["details"]["error"]
+                        details = result_dict.get("details")
+                        error_obj = details.get("error") if isinstance(details, dict) else None
+                        if isinstance(error_obj, dict):
                             if error_obj.get("code") == 200 and "Provide valid app ID" in error_obj.get("message", ""):
                                 logger.error("Meta API authentication configuration issue")
                                 logger.error(f"Current app_id: {app_id}")
@@ -507,19 +727,26 @@ def meta_api_tool(func):
                                         }
                                     }
                                 }, indent=2)
+                            return sanitized_str
+                        # Keep catalog / unapproved-API hints as structured JSON
+                        # so agents see catalog_management guidance immediately.
+                        if result_dict.get("hint"):
+                            return sanitized_str
+                        # Historical envelope: simple {"error": "..."} strings
+                        # were wrapped as {"data": "<json>"} (KeyError on missing
+                        # details.error). Preserve that for existing clients.
+                        return json.dumps({"data": sanitized_str}, indent=2)
                 except Exception:
                     # Not JSON or other parsing error, wrap it in a dictionary
-                    return json.dumps({"data": result}, indent=2)
+                    return json.dumps({"data": sanitized_str}, indent=2)
+                return sanitized_str
             
-            # If result is already a dictionary, ensure it's properly serialized
-            if isinstance(result, dict):
-                return json.dumps(result, indent=2)
-            
-            return result
+            # If result is already a dictionary (or list), sanitize then serialize
+            return json.dumps(_safe_api_payload(result, secrets), indent=2)
         except McpToolError:
             raise  # Let FastMCP set isError: true and refund the usage credit
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {str(e)}")
             return json.dumps({"error": str(e)}, indent=2)
 
-    return wrapper 
+    return wrapper
