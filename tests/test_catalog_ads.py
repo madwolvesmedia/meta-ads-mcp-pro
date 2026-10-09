@@ -41,8 +41,11 @@ async def test_create_catalog_ad_creative_carousel_template():
         assert story["page_id"] == "page_1"
         assert story["template_data"]["call_to_action"]["type"] == "SHOP_NOW"
         assert "{{product.name}}" in story["template_data"]["message"]
+        assert story["template_data"]["name"] == "{{product.name}}"
+        assert story["template_data"]["description"] == "{{product.price}}"
         assert params["url_tags"] == "utm_source=facebook"
         assert "force_single_link" not in story["template_data"]
+        assert "asset_feed_spec" not in params
 
 
 @pytest.mark.asyncio
@@ -72,8 +75,11 @@ async def test_create_catalog_ad_creative_single_and_collection():
             access_token="tok",
         )
         params = mock_api.call_args[0][2]
-        assert params["asset_feed_spec"]["ad_formats"] == ["COLLECTION"]
-        assert params["asset_feed_spec"]["images"][0]["hash"] == "abc"
+        feed = params["asset_feed_spec"]
+        assert feed["ad_formats"] == ["COLLECTION"]
+        assert feed["images"][0]["hash"] == "abc"
+        assert feed["descriptions"] == [{"text": "{{product.price}}"}]
+        assert feed["titles"] == [{"text": "{{product.name}}"}]
         assert "degrees_of_freedom_spec" in params
 
 
@@ -86,16 +92,30 @@ async def test_create_catalog_ad_creative_format_automation_and_enhancements():
             product_set_id="ps_1",
             page_id="page_1",
             link="https://shop.example.com",
+            message="Buy {{product.name}}",
+            headline="{{product.name}}",
+            description="{{product.price}}",
             format="auto",
             enable_enhancements=True,
             access_token="tok",
         ))
         assert result["format"] == "auto"
         params = mock_api.call_args[0][2]
-        assert params["asset_feed_spec"]["ad_formats"] == ["CAROUSEL", "COLLECTION"]
-        assert params["asset_feed_spec"]["optimization_type"] == "REGULAR"
+        story = params["object_story_spec"]["template_data"]
+        assert story["name"] == "{{product.name}}"
+        assert story["description"] == "{{product.price}}"
+        assert story["message"] == "Buy {{product.name}}"
+        feed = params["asset_feed_spec"]
+        assert feed["ad_formats"] == ["CAROUSEL", "COLLECTION"]
+        assert feed["optimization_type"] == "REGULAR"
+        assert feed["titles"] == [{"text": "{{product.name}}"}]
+        assert feed["descriptions"] == [{"text": "{{product.price}}"}]
+        assert feed["bodies"] == [{"text": "Buy {{product.name}}"}]
+        assert feed["link_urls"] == [{"website_url": "https://shop.example.com"}]
+        assert feed["call_to_action_types"] == ["SHOP_NOW"]
         features = params["degrees_of_freedom_spec"]["creative_features_spec"]
-        assert features["standard_enhancements"]["enroll_status"] == "OPT_IN"
+        assert "standard_enhancements" not in features
+        assert features["standard_enhancements_catalog"]["enroll_status"] == "OPT_IN"
         assert features["image_enhancement"]["enroll_status"] == "OPT_IN"
         assert features["enhance_cta"]["enroll_status"] == "OPT_IN"
 
@@ -119,8 +139,86 @@ async def test_create_catalog_ad_creative_asset_feed_spec_passthrough():
             access_token="tok",
         )
         params = mock_api.call_args[0][2]
-        assert params["asset_feed_spec"]["ad_formats"] == ["CAROUSEL", "COLLECTION"]
+        feed = params["asset_feed_spec"]
+        assert feed["ad_formats"] == ["CAROUSEL", "COLLECTION"]
+        assert feed["descriptions"] == [{"text": "{{product.price}}"}]
+        assert feed["titles"] == [{"text": "{{product.name}}"}]
         assert params["degrees_of_freedom_spec"]["creative_features_spec"]["standard_enhancements"]["enroll_status"] == "OPT_IN"
+
+
+@pytest.mark.asyncio
+async def test_create_catalog_ad_creative_enhancements_default_off():
+    with patch("meta_ads_mcp.core.catalog_ads.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "cr_plain"}
+        await create_catalog_ad_creative(
+            account_id="act_1",
+            product_set_id="ps_1",
+            page_id="page_1",
+            link="https://shop.example.com",
+            format="auto",
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        assert "degrees_of_freedom_spec" not in params
+        assert params["asset_feed_spec"]["descriptions"] == [{"text": "{{product.price}}"}]
+
+
+@pytest.mark.asyncio
+async def test_create_catalog_ad_creative_standard_enhancements_catalog_flag():
+    with patch("meta_ads_mcp.core.catalog_ads.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "cr_sec"}
+        await create_catalog_ad_creative(
+            account_id="act_1",
+            product_set_id="ps_1",
+            page_id="page_1",
+            link="https://shop.example.com",
+            standard_enhancements_catalog=True,
+            access_token="tok",
+        )
+        features = mock_api.call_args[0][2]["degrees_of_freedom_spec"]["creative_features_spec"]
+        assert features == {"standard_enhancements_catalog": {"enroll_status": "OPT_IN"}}
+
+        mock_api.return_value = {"id": "cr_sec_off"}
+        await create_catalog_ad_creative(
+            account_id="act_1",
+            product_set_id="ps_1",
+            page_id="page_1",
+            link="https://shop.example.com",
+            enable_enhancements=True,
+            standard_enhancements_catalog=False,
+            access_token="tok",
+        )
+        features = mock_api.call_args[0][2]["degrees_of_freedom_spec"]["creative_features_spec"]
+        assert features["standard_enhancements_catalog"]["enroll_status"] == "OPT_OUT"
+        assert features["image_uncrop"]["enroll_status"] == "OPT_IN"
+
+
+@pytest.mark.asyncio
+async def test_create_catalog_ad_creative_template_data_fills_both_shapes():
+    with patch("meta_ads_mcp.core.catalog_ads.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "cr_td"}
+        await create_catalog_ad_creative(
+            account_id="act_1",
+            product_set_id="ps_1",
+            page_id="page_1",
+            link="https://shop.example.com",
+            format="auto",
+            template_data={
+                "name": "{{product.brand}}",
+                "description": "{{product.current_price}}",
+                "message": "Now {{product.name}}",
+            },
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        td = params["object_story_spec"]["template_data"]
+        assert td["name"] == "{{product.brand}}"
+        assert td["description"] == "{{product.current_price}}"
+        assert td["message"] == "Now {{product.name}}"
+        feed = params["asset_feed_spec"]
+        assert feed["titles"] == [{"text": "{{product.brand}}"}]
+        assert feed["descriptions"] == [{"text": "{{product.current_price}}"}]
+        assert feed["bodies"] == [{"text": "Now {{product.name}}"}]
 
 
 @pytest.mark.asyncio

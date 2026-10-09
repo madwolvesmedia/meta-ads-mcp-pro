@@ -240,7 +240,7 @@ P0/P1 tools in this fork (Graph API `v24.0`, same as upstream). Call them by the
 - `list_catalog_products` — catalog or set products (optional `filter_rules`, `retailer_id`)
 - `list_product_feeds` / `get_product_feed` / `get_feed_upload_status`
 - `get_catalog_diagnostics` — diagnostics + event stats
-- `create_catalog_ad_creative` — `product_set_id` + `template_data` (`{{product.name}}`, `{{product.price}}`, …); `format`: carousel / single / collection / auto (carousel+collection switching via `asset_feed_spec`); `enable_enhancements` / `degrees_of_freedom_spec` creative enhancements; CTA, `url_tags`
+- `create_catalog_ad_creative` — `product_set_id` + copy in both `template_data` (`name`/`description`/`message`) and `asset_feed_spec` (`titles`/`descriptions`/`bodies`) so `format=auto` stores `{{product.price}}`; `format`: carousel / single / collection / auto; enhancements default **off** — `enable_enhancements=true` matches Ads Manager (includes `standard_enhancements_catalog`), or set `standard_enhancements_catalog` alone; CTA, `url_tags`
 - `create_catalog_adset` — CBO-friendly catalog ad set: `promoted_object` with `product_set_id` + `custom_event_type` (default `PURCHASE`), `optimization_goal=VALUE`, Advantage+ audience, excluded custom audiences, `attribution_spec`
 
 Existing `create_campaign` / `create_adset` / `update_adset` also accept catalog fields (`promoted_object`, `product_set_id`, `custom_event_type`, `pixel_id`, `excluded_custom_audience_ids`, `advantage_audience`) without renaming old parameters.
