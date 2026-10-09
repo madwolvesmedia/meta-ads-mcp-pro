@@ -4,6 +4,8 @@ import json
 from typing import Optional, Dict, Any
 
 from .api import meta_api_tool, make_api_request
+from .helpers import dump, error
+from .safety import require_confirm
 from .server import mcp_server
 # Assuming no other specific dependencies from adsets.py are needed for this single function.
 # If other utilities from adsets.py (like get_ad_accounts) were needed, they'd be imported here.
@@ -68,4 +70,54 @@ async def create_budget_schedule(
             "details": error_msg,
             "campaign_id": campaign_id,
             "params_sent": params
-        }, indent=2) 
+        }, indent=2)
+
+
+@mcp_server.tool()
+@meta_api_tool
+async def list_budget_schedules(
+    campaign_id: str,
+    access_token: Optional[str] = None,
+    limit: int = 25,
+) -> str:
+    """List high-demand budget schedules on a campaign.
+
+    Args:
+        campaign_id: Meta Ads campaign ID
+        access_token: Meta API access token (optional)
+        limit: Page size
+    """
+    if not campaign_id:
+        return error("Campaign ID is required")
+    data = await make_api_request(
+        f"{campaign_id}/budget_schedules",
+        access_token,
+        {
+            "fields": "id,budget_value,budget_value_type,time_start,time_end",
+            "limit": limit,
+        },
+    )
+    return dump(data)
+
+
+@mcp_server.tool()
+@meta_api_tool
+async def delete_budget_schedule(
+    budget_schedule_id: str,
+    confirm: bool = False,
+    access_token: Optional[str] = None,
+) -> str:
+    """Delete a campaign budget schedule. Requires confirm=true.
+
+    Args:
+        budget_schedule_id: Budget schedule ID
+        confirm: Must be true to proceed
+        access_token: Meta API access token (optional)
+    """
+    if not budget_schedule_id:
+        return error("Budget schedule ID is required")
+    blocked = require_confirm(confirm, "delete_budget_schedule")
+    if blocked:
+        return blocked
+    data = await make_api_request(budget_schedule_id, access_token, {}, method="DELETE")
+    return dump(data) 
