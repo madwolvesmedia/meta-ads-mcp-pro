@@ -46,6 +46,17 @@ _CATALOG_MANAGEMENT_HINT = (
     "feature permission is missing."
 )
 
+# Subcode 1885183: object created while the Meta app is in Development mode.
+_DEV_MODE_SUBCODE = 1885183
+_DEV_MODE_SNIPPET = "in development mode"
+_DEV_MODE_HINT = (
+    "Meta returned error subcode 1885183: this object was created by an app that is "
+    "in Development mode. Switch the Meta app to Live in the App Dashboard "
+    "(App settings → App mode / publish live) before using it to create ads, "
+    "audiences, or catalog objects in a real ad account. Development-mode apps "
+    "can only be used by people listed as app admins, developers, or testers."
+)
+
 
 def _redact_url(url: str) -> str:
     """Strip sensitive query params (access_token, appsecret_proof) from a URL.
@@ -150,6 +161,26 @@ def _contains_unapproved_api_error(data: Any) -> bool:
     return False
 
 
+def _add_hint(payload: Dict[str, Any], hint: str) -> Dict[str, Any]:
+    """Attach hint at the payload root and on a matching error object. Idempotent."""
+    out = dict(payload)
+    existing = out.get("hint")
+    if not existing:
+        out["hint"] = hint
+    elif hint not in str(existing):
+        out["hint"] = f"{existing} {hint}"
+    err = out.get("error")
+    if isinstance(err, dict):
+        err = dict(err)
+        err_existing = err.get("hint")
+        if not err_existing:
+            err["hint"] = hint
+        elif hint not in str(err_existing):
+            err["hint"] = f"{err_existing} {hint}"
+        out["error"] = err
+    return out
+
+
 def annotate_unapproved_api_error(payload: Any) -> Any:
     """Attach a catalog_management hint when Meta returns the unapproved-API error.
 
@@ -160,20 +191,60 @@ def annotate_unapproved_api_error(payload: Any) -> Any:
     """
     if not isinstance(payload, dict) or not _contains_unapproved_api_error(payload):
         return payload
-    out = dict(payload)
-    out.setdefault("hint", _CATALOG_MANAGEMENT_HINT)
-    err = out.get("error")
-    if isinstance(err, dict):
-        err = dict(err)
-        if _is_unapproved_api_error_value(err) or _contains_unapproved_api_error(err):
-            err.setdefault("hint", _CATALOG_MANAGEMENT_HINT)
-        out["error"] = err
-    return out
+    return _add_hint(payload, _CATALOG_MANAGEMENT_HINT)
+
+
+def _is_development_mode_error_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return _DEV_MODE_SNIPPET in value.lower() or "1885183" in value
+    if not isinstance(value, dict):
+        return False
+    if value.get("error_subcode") == _DEV_MODE_SUBCODE or value.get("code") == _DEV_MODE_SUBCODE:
+        return True
+    blob = " ".join(
+        str(value.get(key, ""))
+        for key in ("message", "error_user_msg", "error_user_title", "error_subcode")
+    ).lower()
+    if _DEV_MODE_SNIPPET in blob:
+        return True
+    nested = value.get("error")
+    if nested is not None and nested is not value:
+        return _is_development_mode_error_value(nested)
+    details = value.get("details")
+    if details is not None and details is not value:
+        return _is_development_mode_error_value(details)
+    return False
+
+
+def _contains_development_mode_error(data: Any) -> bool:
+    if isinstance(data, dict):
+        if _is_development_mode_error_value(data):
+            return True
+        return any(_contains_development_mode_error(v) for v in data.values())
+    if isinstance(data, list):
+        return any(_contains_development_mode_error(item) for item in data)
+    if isinstance(data, str):
+        return _DEV_MODE_SNIPPET in data.lower() or "1885183" in data
+    return False
+
+
+def annotate_development_mode_error(payload: Any) -> Any:
+    """Attach a Live-app hint when Meta returns subcode 1885183 (development mode)."""
+    if not isinstance(payload, dict) or not _contains_development_mode_error(payload):
+        return payload
+    return _add_hint(payload, _DEV_MODE_HINT)
+
+
+def annotate_graph_errors(payload: Any) -> Any:
+    """Attach known Graph permission / app-mode hints. Idempotent."""
+    payload = annotate_unapproved_api_error(payload)
+    payload = annotate_development_mode_error(payload)
+    return payload
 
 
 def _safe_api_payload(payload: Any, secrets: Optional[Iterable[str]] = None) -> Any:
     """Sanitize credentials then annotate known Graph permission errors."""
-    return annotate_unapproved_api_error(sanitize_graph_payload(payload, secrets))
+    return annotate_graph_errors(sanitize_graph_payload(payload, secrets))
 
 
 class McpToolError(Exception):

@@ -240,18 +240,20 @@ P0/P1 tools in this fork (Graph API `v24.0`, same as upstream). Call them by the
 - `list_catalog_products` — catalog or set products (optional `filter_rules`, `retailer_id`)
 - `list_product_feeds` / `get_product_feed` / `get_feed_upload_status`
 - `get_catalog_diagnostics` — diagnostics + event stats
-- `create_catalog_ad_creative` — `product_set_id` + `template_data` (`{{product.name}}`, `{{product.price}}`, …); `format`: carousel / single / collection; CTA, `url_tags`, dynamic media / creative enhancements
+- `create_catalog_ad_creative` — `product_set_id` + `template_data` (`{{product.name}}`, `{{product.price}}`, …); `format`: carousel / single / collection / auto (carousel+collection switching via `asset_feed_spec`); `enable_enhancements` / `degrees_of_freedom_spec` creative enhancements; CTA, `url_tags`
 - `create_catalog_adset` — CBO-friendly catalog ad set: `promoted_object` with `product_set_id` + `custom_event_type` (default `PURCHASE`), `optimization_goal=VALUE`, Advantage+ audience, excluded custom audiences, `attribution_spec`
 
 Existing `create_campaign` / `create_adset` / `update_adset` also accept catalog fields (`promoted_object`, `product_set_id`, `custom_event_type`, `pixel_id`, `excluded_custom_audience_ids`, `advantage_audience`) without renaming old parameters.
 
-Catalog tools require the `catalog_management` permission (App Review). If Meta returns `(#100) This application has not been approved to use this api`, the tool response includes a hint that `ads_management` is not enough.
+Catalog tools require the `catalog_management` permission (App Review). If Meta returns `(#100) This application has not been approved to use this api`, the tool response includes a hint that `ads_management` is not enough. Error subcode `1885183` (app in development mode) includes a hint that the Meta app must be switched to Live.
 
 **Paging URLs:** Graph `paging.next` / `paging.previous` (and any other returned URL or payload) have `access_token` and `appsecret_proof` stripped by a shared sanitizer. `graph_api_get` and every list/raw-response tool go through it.
 
 **Custom audiences, pixels, lifecycle, insights**
 
 - `list_custom_audiences` / `get_custom_audience` / `create_custom_audience` / `update_custom_audience` / `delete_custom_audience`
+- `create_custom_audience` omits `subtype` for pixel/website audiences (Graph rejects it); send `subtype` only for CUSTOM customer-lists, LOOKALIKE, CLAIM, etc.
+- `create_product_audience` — catalog product audiences (`/act_X/product_audiences`) with ViewContent / AddToCart / Purchase inclusions and exclusions
 - `upload_custom_audience_users` — SHA-256 hashed customer-list upload (`confirm=true`)
 - `create_lookalike_audience` / `list_saved_audiences` / `get_saved_audience`
 - `list_pixels` / `get_pixel` / `get_pixel_stats`

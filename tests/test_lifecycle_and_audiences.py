@@ -9,6 +9,7 @@ from meta_ads_mcp.core.lifecycle import copy_campaign, copy_adset, copy_ad, bulk
 from meta_ads_mcp.core.audiences import (
     create_custom_audience,
     create_lookalike_audience,
+    create_product_audience,
     upload_custom_audience_users,
     hash_customer_rows,
     list_saved_audiences,
@@ -86,8 +87,99 @@ async def test_create_website_audience():
         ))
         assert result["id"] == "aud_1"
         params = mock_api.call_args[0][2]
-        assert params["subtype"] == "WEBSITE"
+        assert "subtype" not in params
         assert params["pixel_id"] == "px_1"
+
+
+@pytest.mark.asyncio
+async def test_create_website_audience_omits_subtype_even_when_default_custom():
+    with patch("meta_ads_mcp.core.audiences.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "aud_2"}
+        await create_custom_audience(
+            account_id="act_1",
+            name="Pixel visitors",
+            pixel_id="px_1",
+            rule={"inclusions": {"operator": "or", "rules": []}},
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        assert "subtype" not in params
+        assert params["pixel_id"] == "px_1"
+
+
+@pytest.mark.asyncio
+async def test_create_customer_list_audience_sends_subtype_custom():
+    with patch("meta_ads_mcp.core.audiences.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "aud_c"}
+        await create_custom_audience(
+            account_id="act_1",
+            name="CRM list",
+            subtype="CUSTOM",
+            customer_file_source="USER_PROVIDED_ONLY",
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        assert params["subtype"] == "CUSTOM"
+        assert params["customer_file_source"] == "USER_PROVIDED_ONLY"
+
+
+@pytest.mark.asyncio
+async def test_create_custom_audience_lookalike_sends_subtype():
+    with patch("meta_ads_mcp.core.audiences.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "lal_2"}
+        await create_custom_audience(
+            account_id="act_1",
+            name="LAL",
+            subtype="LOOKALIKE",
+            origin_audience_id="aud_1",
+            lookalike_spec={"country": "US", "ratio": 0.01},
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        assert params["subtype"] == "LOOKALIKE"
+
+
+@pytest.mark.asyncio
+async def test_create_product_audience_convenience_events():
+    with patch("meta_ads_mcp.core.audiences.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "pa_1"}
+        result = parse(await create_product_audience(
+            account_id="act_1",
+            name="Viewed not purchased",
+            product_set_id="ps_1",
+            view_content_days=14,
+            add_to_cart_days=14,
+            exclude_purchase_days=7,
+            access_token="tok",
+        ))
+        assert result["id"] == "pa_1"
+        assert mock_api.call_args[0][0] == "act_1/product_audiences"
+        assert mock_api.call_args.kwargs.get("method") == "POST"
+        params = mock_api.call_args[0][2]
+        assert params["product_set_id"] == "ps_1"
+        events = [c["rule"]["event"]["eq"] for c in params["inclusions"]]
+        assert events == ["ViewContent", "AddToCart"]
+        assert params["inclusions"][0]["retention_seconds"] == 14 * 86400
+        assert params["exclusions"][0]["rule"]["event"]["eq"] == "Purchase"
+        assert params["exclusions"][0]["retention_seconds"] == 7 * 86400
+
+
+@pytest.mark.asyncio
+async def test_create_product_audience_explicit_clauses():
+    with patch("meta_ads_mcp.core.audiences.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "pa_2"}
+        await create_product_audience(
+            account_id="1",
+            name="ATC",
+            product_set_id="ps_9",
+            inclusions=[{"event": "AddToCart", "retention_days": 30}],
+            exclusions=[{"retention_seconds": 86400, "rule": {"event": {"eq": "Purchase"}}}],
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        assert params["inclusions"][0]["retention_seconds"] == 30 * 86400
+        assert params["inclusions"][0]["rule"]["event"]["eq"] == "AddToCart"
+        assert params["exclusions"][0]["retention_seconds"] == 86400
 
 
 @pytest.mark.asyncio

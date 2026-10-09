@@ -13,7 +13,9 @@ import pytest
 
 from meta_ads_mcp.core.api import (
     _CATALOG_MANAGEMENT_HINT,
+    _DEV_MODE_HINT,
     _redact_url,
+    annotate_development_mode_error,
     annotate_unapproved_api_error,
     make_api_request,
     sanitize_graph_payload,
@@ -220,6 +222,23 @@ def test_dump_helper_redacts_and_is_used_by_new_tools():
     assert_no_secrets(text)
 
 
+@pytest.mark.asyncio
+async def test_get_ads_paging_next_redacts_token():
+    """Live leak: get_ads paging.next included access_token. dump() must strip it
+    even when make_api_request is patched (last-mile + list-tool dump())."""
+    dirty = _paging_body("act_1/ads")
+    with patch(
+        "meta_ads_mcp.core.ads.make_api_request",
+        new_callable=AsyncMock,
+        return_value=dirty,
+    ):
+        result = await get_ads(account_id="act_1", access_token=SECRET)
+    assert_no_secrets(result)
+    parsed = json.loads(result)
+    assert "access_token=REDACTED" in parsed["paging"]["next"]
+    assert "appsecret_proof=REDACTED" in parsed["paging"]["previous"]
+
+
 # ---------------------------------------------------------------------------
 # Tool coverage: graph_api_get + new and existing list tools
 # ---------------------------------------------------------------------------
@@ -398,3 +417,56 @@ async def test_http_400_unapproved_api_is_sanitized_and_hinted():
     assert SECRET not in serialized
     assert "catalog_management" in result.get("hint", "")
     assert "catalog_management" in result["error"].get("hint", "")
+
+
+def test_annotate_development_mode_error_adds_live_app_hint():
+    payload = {
+        "error": {
+            "message": "Object does not exist, cannot be loaded due to missing permission.",
+            "error_user_msg": "Your ad was created by an app that is in development mode.",
+            "error_subcode": 1885183,
+            "code": 100,
+        }
+    }
+    annotated = annotate_development_mode_error(payload)
+    assert annotated["hint"] == _DEV_MODE_HINT
+    assert "Live" in annotated["hint"]
+    assert annotated["error"]["hint"] == _DEV_MODE_HINT
+
+
+@pytest.mark.asyncio
+async def test_http_400_development_mode_is_hinted_and_sanitized():
+    error_body = {
+        "error": {
+            "message": "created by an app that is in development mode",
+            "error_subcode": 1885183,
+            "code": 100,
+        }
+    }
+    with _patch_graph_get(error_body, status=400):
+        result = await make_api_request("act_1/ads", SECRET, {"fields": "id"})
+    serialized = json.dumps(result)
+    assert SECRET not in serialized
+    assert "1885183" in serialized or "development mode" in serialized.lower()
+    assert "Live" in result.get("hint", "")
+    assert "Live" in result["error"].get("hint", "")
+
+
+@pytest.mark.asyncio
+async def test_create_product_audience_output_redacts_paging():
+    from meta_ads_mcp.core.audiences import create_product_audience
+
+    dirty = _paging_body("act_1/product_audiences")
+    with patch(
+        "meta_ads_mcp.core.audiences.make_api_request",
+        new_callable=AsyncMock,
+        return_value=dirty,
+    ):
+        result = await create_product_audience(
+            account_id="act_1",
+            name="Viewed",
+            product_set_id="ps_1",
+            view_content_days=14,
+            access_token=SECRET,
+        )
+    assert_no_secrets(result)

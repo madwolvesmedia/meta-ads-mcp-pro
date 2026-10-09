@@ -78,6 +78,52 @@ async def test_create_catalog_ad_creative_single_and_collection():
 
 
 @pytest.mark.asyncio
+async def test_create_catalog_ad_creative_format_automation_and_enhancements():
+    with patch("meta_ads_mcp.core.catalog_ads.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "cr_auto"}
+        result = parse(await create_catalog_ad_creative(
+            account_id="act_1",
+            product_set_id="ps_1",
+            page_id="page_1",
+            link="https://shop.example.com",
+            format="auto",
+            enable_enhancements=True,
+            access_token="tok",
+        ))
+        assert result["format"] == "auto"
+        params = mock_api.call_args[0][2]
+        assert params["asset_feed_spec"]["ad_formats"] == ["CAROUSEL", "COLLECTION"]
+        assert params["asset_feed_spec"]["optimization_type"] == "REGULAR"
+        features = params["degrees_of_freedom_spec"]["creative_features_spec"]
+        assert features["standard_enhancements"]["enroll_status"] == "OPT_IN"
+        assert features["image_enhancement"]["enroll_status"] == "OPT_IN"
+        assert features["enhance_cta"]["enroll_status"] == "OPT_IN"
+
+
+@pytest.mark.asyncio
+async def test_create_catalog_ad_creative_asset_feed_spec_passthrough():
+    with patch("meta_ads_mcp.core.catalog_ads.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"id": "cr_feed"}
+        await create_catalog_ad_creative(
+            account_id="act_1",
+            product_set_id="ps_1",
+            page_id="page_1",
+            link="https://shop.example.com",
+            format="carousel",
+            asset_feed_spec={"ad_formats": ["CAROUSEL", "COLLECTION"], "optimization_type": "REGULAR"},
+            degrees_of_freedom_spec={
+                "creative_features_spec": {
+                    "standard_enhancements": {"enroll_status": "OPT_IN"},
+                }
+            },
+            access_token="tok",
+        )
+        params = mock_api.call_args[0][2]
+        assert params["asset_feed_spec"]["ad_formats"] == ["CAROUSEL", "COLLECTION"]
+        assert params["degrees_of_freedom_spec"]["creative_features_spec"]["standard_enhancements"]["enroll_status"] == "OPT_IN"
+
+
+@pytest.mark.asyncio
 async def test_create_catalog_adset_cbo_sales_defaults():
     with patch("meta_ads_mcp.core.catalog_ads.make_api_request", new_callable=AsyncMock) as mock_api:
         mock_api.return_value = {"id": "adset_1"}

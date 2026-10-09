@@ -4,6 +4,7 @@ import json
 from typing import List, Optional, Dict, Any, Union
 from .api import meta_api_tool, make_api_request, ensure_act_prefix
 from .accounts import get_ad_accounts
+from .helpers import dump
 from .server import mcp_server
 
 
@@ -81,8 +82,8 @@ async def get_campaigns(
         params["after"] = after
     
     data = await make_api_request(endpoint, access_token, params)
-    
-    return json.dumps(data, indent=2)
+
+    return dump(data)
 
 
 @mcp_server.tool()

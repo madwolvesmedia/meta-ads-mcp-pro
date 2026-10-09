@@ -20,6 +20,17 @@ _TEMPLATE_FIELDS = (
     "{{ad.name}}",
 )
 
+# Ads Manager catalog ads auto-switch carousel <-> collection.
+_FORMAT_AUTOMATION = frozenset({"auto", "automatic", "carousel_collection", "format_automation"})
+_CATALOG_ENHANCEMENTS = {
+    "standard_enhancements": {"enroll_status": "OPT_IN"},
+    "image_enhancement": {"enroll_status": "OPT_IN"},
+    "image_uncrop": {"enroll_status": "OPT_IN"},
+    "text_optimizations": {"enroll_status": "OPT_IN"},
+    "enhance_cta": {"enroll_status": "OPT_IN"},
+    "video_auto_crop": {"enroll_status": "OPT_IN"},
+}
+
 
 @mcp_server.tool()
 @meta_api_tool
@@ -46,8 +57,11 @@ async def create_catalog_ad_creative(
     enable_dynamic_media: Optional[bool] = None,
     image_layer_specs: Optional[List[Dict[str, Any]]] = None,
     collection_hero_image_hash: Optional[str] = None,
+    asset_feed_spec: Optional[Dict[str, Any]] = None,
+    degrees_of_freedom_spec: Optional[Dict[str, Any]] = None,
+    enable_enhancements: bool = False,
 ) -> str:
-    """Create a Advantage+ catalog / DPA ad creative (carousel, single, or collection).
+    """Create a Advantage+ catalog / DPA ad creative (carousel, single, collection, or auto).
 
     Uses product_set_id plus object_story_spec.template_data so Meta fills cards from
     the catalog. Template placeholders include {{product.name}}, {{product.price}},
@@ -57,6 +71,8 @@ async def create_catalog_ad_creative(
       - carousel (default): dynamic product carousel from the product set
       - single: one catalog product at a time
       - collection: collection ad (optional hero image via collection_hero_image_hash)
+      - auto: Ads Manager-style format automation (carousel + collection switching
+        via asset_feed_spec.ad_formats CAROUSEL, COLLECTION)
 
     Args:
         account_id: Ad account ID (act_XXXXXXXXX)
@@ -69,7 +85,7 @@ async def create_catalog_ad_creative(
         headline: Card title / name template
         description: Card description template
         call_to_action_type: CTA enum (SHOP_NOW, LEARN_MORE, BUY_NOW, ...)
-        format: carousel | single | collection
+        format: carousel | single | collection | auto (carousel+collection switching)
         url_tags: Tracking query string appended to product links
                   (e.g. utm_source=facebook&utm_medium=cpc)
         instagram_user_id: Instagram account ID for IG placements
@@ -83,6 +99,11 @@ async def create_catalog_ad_creative(
         enable_dynamic_media: Opt in to catalog dynamic media if True
         image_layer_specs: Optional overlay layers for catalog images
         collection_hero_image_hash: Hero image hash for collection format
+        asset_feed_spec: Full asset_feed_spec override / merge (ad_formats, images, ...)
+        degrees_of_freedom_spec: Full degrees_of_freedom_spec override
+        enable_enhancements: Opt in to standard catalog creative enhancements
+            (standard_enhancements, image_enhancement, image_uncrop, text_optimizations,
+            enhance_cta, video_auto_crop) via degrees_of_freedom_spec
     """
     if not account_id:
         return error("No account ID provided")
@@ -136,22 +157,51 @@ async def create_catalog_ad_creative(
     features = parse_jsonish(creative_features_spec) if creative_features_spec else {}
     if not isinstance(features, dict):
         features = {}
-    if enable_dynamic_media:
-        features.setdefault("video_auto_crop", {"enroll_status": "OPT_IN"})
-        features.setdefault("image_enhancement", {"enroll_status": "OPT_IN"})
-        features.setdefault("enhance_cta", {"enroll_status": "OPT_IN"})
-    if features:
+    if enable_dynamic_media or enable_enhancements:
+        defaults = _CATALOG_ENHANCEMENTS if enable_enhancements else {
+            "video_auto_crop": {"enroll_status": "OPT_IN"},
+            "image_enhancement": {"enroll_status": "OPT_IN"},
+            "enhance_cta": {"enroll_status": "OPT_IN"},
+        }
+        for key, value in defaults.items():
+            features.setdefault(key, value)
+
+    dof = parse_jsonish(degrees_of_freedom_spec) if degrees_of_freedom_spec else None
+    if isinstance(dof, dict):
+        dof = dict(dof)
+        nested = dof.get("creative_features_spec")
+        if isinstance(nested, dict):
+            merged = dict(features)
+            merged.update(nested)
+            dof["creative_features_spec"] = merged
+        elif features:
+            dof["creative_features_spec"] = features
+        params["degrees_of_freedom_spec"] = dof
+    elif features:
         params["degrees_of_freedom_spec"] = {"creative_features_spec": features}
 
     layers = parse_jsonish(image_layer_specs) if image_layer_specs else None
     if layers:
         params["image_layer_spec"] = layers
 
-    if fmt == "collection":
-        asset_feed: Dict[str, Any] = {"ad_formats": ["COLLECTION"]}
+    feed: Optional[Dict[str, Any]] = None
+    if fmt in _FORMAT_AUTOMATION:
+        feed = {
+            "ad_formats": ["CAROUSEL", "COLLECTION"],
+            "optimization_type": "REGULAR",
+        }
+    elif fmt == "collection":
+        feed = {"ad_formats": ["COLLECTION"]}
         if collection_hero_image_hash:
-            asset_feed["images"] = [{"hash": collection_hero_image_hash}]
-        params["asset_feed_spec"] = asset_feed
+            feed["images"] = [{"hash": collection_hero_image_hash}]
+
+    extra_feed = parse_jsonish(asset_feed_spec) if asset_feed_spec else None
+    if isinstance(extra_feed, dict):
+        feed = {**(feed or {}), **extra_feed}
+        if collection_hero_image_hash and "images" not in feed:
+            feed["images"] = [{"hash": collection_hero_image_hash}]
+    if feed:
+        params["asset_feed_spec"] = feed
 
     data = await make_api_request(
         f"{account_id}/adcreatives", access_token, params, method="POST"

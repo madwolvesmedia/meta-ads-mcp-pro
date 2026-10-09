@@ -238,13 +238,13 @@ async def get_insights(object_id: str = "", access_token: Optional[str] = None,
             for row in comparison.get("data", []):
                 if isinstance(row, dict):
                     _strip_redundant_actions(row)
-        return json.dumps({
+        return dump({
             "current": data,
             "comparison": comparison,
             "deltas": _summarize_insight_deltas(data, comparison),
-        }, indent=2)
+        })
 
-    return json.dumps(data, indent=2)
+    return dump(data)
 
 
 def _apply_time_range(params: Dict[str, Any], time_range: Union[str, Dict[str, str]]) -> Optional[str]:
