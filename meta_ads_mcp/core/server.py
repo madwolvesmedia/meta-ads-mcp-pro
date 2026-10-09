@@ -320,6 +320,7 @@ def main():
         logger.info("Ensuring all tools are registered for HTTP transport")
         from . import accounts, campaigns, adsets, ads, insights, authentication
         from . import ads_library, budget_schedules, reports
+        from . import catalogs, catalog_ads, audiences, pixels, lifecycle, extras
         
         # ✅ NEW: Setup HTTP authentication middleware
         logger.info("Setting up HTTP authentication middleware")

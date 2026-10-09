@@ -14,6 +14,12 @@ from .budget_schedules import create_budget_schedule
 from .targeting import search_interests, get_interest_suggestions, estimate_audience_size, search_behaviors, search_demographics, search_geo_locations
 from . import reports  # Import module to register conditional tools
 from . import duplication  # Import module to register conditional duplication tools
+from . import catalogs  # Catalogs, product sets, feeds, diagnostics
+from . import catalog_ads  # DPA / Advantage+ catalog creatives and ad sets
+from . import audiences  # Custom audiences, lookalikes, saved audiences
+from . import pixels  # Pixels/datasets and custom conversions
+from . import lifecycle  # Delete/archive, native /copies, bulk status
+from . import extras  # Rules, video, Instagram, leads, previews, studies, Graph GET
 
 __all__ = [
     'mcp_server',

@@ -6,6 +6,8 @@ This is the **Meta Ads node** of the [Pipeboard](https://pipeboard.co) MCP famil
 
 > **Note:** This is an independent open-source project that uses Meta's public APIs. The hosted service behind it — [Pipeboard](https://pipeboard.co) — is a **badged Meta Business Partner** and an officially approved Meta app that manages **Meta, Google, TikTok, Snap & Reddit Ads** from one login (with a free plan) — so it is neither Meta-only nor something you have to self-host. Meta, Facebook, Instagram, and other Meta brand names are trademarks of their respective owners.
 
+**This repository is an in-house fork (`1.1.0+mwm`)** of [pipeboard-co/meta-ads-mcp](https://github.com/pipeboard-co/meta-ads-mcp). It adds catalog / Advantage+ catalog (DPA) tools, custom audiences, native Graph `/copies` duplication, safety guards, and additional Marketing API coverage so an agent can manage client accounts without Ads Manager. Existing tool names and parameters are unchanged. Licensed BUSL-1.1 (same as upstream).
+
 [![Meta Ads MCP Server Demo](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)](https://github.com/user-attachments/assets/3e605cee-d289-414b-814c-6299e7f3383e)
 
 [![MCP Badge](https://lobehub.com/badge/mcp/nictuku-meta-ads-mcp)](https://lobehub.com/mcp/nictuku-meta-ads-mcp)
@@ -25,6 +27,7 @@ mcp-name: co.pipeboard/meta-ads-mcp
 - [Local Installation (Technical Users Only)](#local-installation-technical-users-only)
 - [Features](#features)
 - [Configuration](#configuration)
+- [Fork additions (catalogs, audiences, safety)](#fork-additions-catalogs-audiences-safety)
 - [Available MCP Tools](#available-mcp-tools)
 - [Licensing](#licensing)
 - [Privacy and Security](#privacy-and-security)
@@ -174,6 +177,7 @@ Meta Ads MCP also supports a local streamable HTTP transport, allowing you to ru
 
 ## Features
 
+- **Catalog & DPA ads**: List business catalogs, product sets with filter rules, catalog creatives (`{{product.name}}` / carousel / collection), and CBO `OUTCOME_SALES` + `VALUE` ad sets with `promoted_object.product_set_id`
 - **Campaign Management**: Launch campaigns, ad sets, and ads, update budgets, pause and resume, and apply targeting changes — all from a conversation, with explicit confirmation on every write
 - **Creative Operations**: Upload images, build creatives, and update copy, headlines, descriptions, and CTAs without leaving your AI client
 - **Dynamic Creative Testing**: One API for both simple ads (single headline/description) and full A/B testing (multiple headlines/descriptions)
@@ -199,7 +203,75 @@ Meta Ads MCP also supports a local streamable HTTP transport, allowing you to ru
 
 For advanced users who need to self-host, the package can be installed from source. Local installations require creating your own Meta Developer App. **We recommend using [Remote MCP](https://pipeboard.co) for a simpler experience.**
 
-### Available MCP Tools
+Typical local stdio launch for this fork:
+
+```bash
+export META_ACCESS_TOKEN=...
+export META_APP_ID=...
+export META_APP_SECRET=...
+export META_AD_ACCOUNT_ID=act_...   # optional convenience for operators
+meta-ads-mcp --app-id "$META_APP_ID"
+```
+
+### Safety environment variables (this fork)
+
+| Variable | Effect |
+|---|---|
+| `META_ADS_READ_ONLY` | When `1`/`true`/`yes`/`on`, block all mutating Graph calls (POST/PUT/PATCH/DELETE). Async insights jobs are still allowed. |
+| `META_ADS_MAX_DAILY_BUDGET` | Integer cap in **account currency cents**. Create/update calls that set `daily_budget` above this value are rejected. |
+| `META_ADS_AUDIT_LOG` | Filesystem path. Mutating calls are appended as JSON lines (tokens and customer-list payloads redacted). |
+| `META_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET` | Existing auth. `META_AD_ACCOUNT_ID` is documented for operators; tools still take `account_id` per call. |
+
+Destructive tools (`delete_*`, customer-list `upload_custom_audience_users`, `bulk_update_status` with `DELETED`) require `confirm=true`. Newly created campaigns, ad sets, and ads default to `PAUSED`.
+
+## Fork additions (catalogs, audiences, safety)
+
+P0/P1 tools in this fork (Graph API `v24.0`, same as upstream). Call them by the function name (MCP clients may prefix `mcp_meta-ads_`).
+
+**Catalogs & catalog ads**
+
+- `list_businesses` — Business Managers the token can access
+- `list_business_catalogs` — owned product catalogs (`business_id` optional = all businesses)
+- `get_catalog` — catalog details
+- `get_ad_account_catalogs` — catalogs assigned to / owned via an ad account
+- `get_pixel_catalogs` — catalogs whose event sources include a pixel/dataset
+- `list_product_sets` / `get_product_set` / `create_product_set` / `update_product_set` / `delete_product_set` (`confirm=true` on delete)
+- `preview_product_set` — count + sample products for a set or ad-hoc filter
+- `list_catalog_products` — catalog or set products (optional `filter_rules`, `retailer_id`)
+- `list_product_feeds` / `get_product_feed` / `get_feed_upload_status`
+- `get_catalog_diagnostics` — diagnostics + event stats
+- `create_catalog_ad_creative` — `product_set_id` + `template_data` (`{{product.name}}`, `{{product.price}}`, …); `format`: carousel / single / collection; CTA, `url_tags`, dynamic media / creative enhancements
+- `create_catalog_adset` — CBO-friendly catalog ad set: `promoted_object` with `product_set_id` + `custom_event_type` (default `PURCHASE`), `optimization_goal=VALUE`, Advantage+ audience, excluded custom audiences, `attribution_spec`
+
+Existing `create_campaign` / `create_adset` / `update_adset` also accept catalog fields (`promoted_object`, `product_set_id`, `custom_event_type`, `pixel_id`, `excluded_custom_audience_ids`, `advantage_audience`) without renaming old parameters.
+
+**Custom audiences, pixels, lifecycle, insights**
+
+- `list_custom_audiences` / `get_custom_audience` / `create_custom_audience` / `update_custom_audience` / `delete_custom_audience`
+- `upload_custom_audience_users` — SHA-256 hashed customer-list upload (`confirm=true`)
+- `create_lookalike_audience` / `list_saved_audiences` / `get_saved_audience`
+- `list_pixels` / `get_pixel` / `get_pixel_stats`
+- `list_custom_conversions` / `get_custom_conversion` / `create_custom_conversion`
+- `delete_campaign` / `delete_adset` / `delete_ad` / `delete_ad_creative` (`confirm=true`)
+- `archive_campaign` / `archive_adset` / `archive_ad`
+- `copy_campaign` / `copy_adset` / `copy_ad` — native Graph `/copies` (free; not the Pipeboard-paid `duplicate_*` tools)
+- `bulk_update_status` — batch ACTIVE/PAUSED/ARCHIVED/DELETED (`DELETED` needs `confirm=true`)
+- `create_insights_job` / `get_insights_job` / `get_insights_job_results` — async reports
+- `get_insights` extras: `time_increment`, `compare_time_range` (deltas), `use_async`, breakdowns including `product_id`, placement, age, gender, region, `action_attribution_windows`
+
+**Also included (P2)**
+
+- Automated rules: `list_ad_rules` / `get_ad_rule` / `create_ad_rule` / `update_ad_rule` / `delete_ad_rule`
+- `upload_ad_video` (public `file_url` or chunked start/transfer/finish) — poll with existing `get_ad_video`
+- `list_instagram_accounts`
+- Lead forms: `list_lead_forms` / `get_lead_form` / `create_lead_form` / `get_lead_form_leads`
+- `get_account_funding` — spend cap, balance, funding sources (read)
+- `generate_ad_preview` / `get_ad_review_info` / `get_account_activities`
+- A/B tests: `list_ad_studies` / `get_ad_study` / `create_ad_study`
+- `list_budget_schedules` / `delete_budget_schedule`
+- `graph_api_get` — read-only Graph GET passthrough (ID + optional edge; no URLs, no writes)
+
+## Available MCP Tools
 
 1. `mcp_meta_ads_get_ad_accounts`
    - Get ad accounts accessible by a user

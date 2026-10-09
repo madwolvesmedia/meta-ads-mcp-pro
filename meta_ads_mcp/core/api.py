@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from . import auth
 from .auth import needs_authentication, auth_manager, start_callback_server, shutdown_callback_server
 from .utils import logger
+from . import safety
 
 
 # Query-string params that must never leak to the caller in error payloads.
@@ -63,7 +64,7 @@ def ensure_act_prefix(account_id: str) -> str:
 # Constants
 META_GRAPH_API_VERSION = "v24.0"
 META_GRAPH_API_BASE = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}"
-USER_AGENT = "meta-ads-mcp/1.0"
+USER_AGENT = "meta-ads-mcp/1.1.0"
 
 # Log key environment and configuration at startup
 logger.info("Core API module initialized")
@@ -167,7 +168,8 @@ async def make_api_request(
     endpoint: str,
     access_token: str,
     params: Optional[Dict[str, Any]] = None,
-    method: str = "GET"
+    method: str = "GET",
+    mutation: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Make a request to the Meta Graph API.
@@ -176,7 +178,10 @@ async def make_api_request(
         endpoint: API endpoint path (without base URL)
         access_token: Meta API access token
         params: Additional query parameters
-        method: HTTP method (GET, POST, DELETE)
+        method: HTTP method (GET, POST, PUT, DELETE)
+        mutation: Override whether this call is treated as a write. Defaults to
+            True for POST/PUT/PATCH/DELETE. Pass False for report-style POSTs
+            (e.g. async insights jobs) so META_ADS_READ_ONLY does not block them.
     
     Returns:
         API response as a dictionary
@@ -191,8 +196,17 @@ async def make_api_request(
                 "action_required": "Please authenticate first"
             }
         }
-        
-    url = f"{META_GRAPH_API_BASE}/{endpoint}"
+
+    is_mutation = mutation if mutation is not None else method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+    if is_mutation:
+        if safety.is_read_only():
+            return safety.read_only_error()
+        budget_error = safety.check_params_budget(params)
+        if budget_error:
+            return budget_error
+        safety.audit_write(method, endpoint, params)
+
+    url = f"{META_GRAPH_API_BASE}/{endpoint.lstrip('/')}" if endpoint else META_GRAPH_API_BASE
     
     headers = {
         "User-Agent": USER_AGENT,

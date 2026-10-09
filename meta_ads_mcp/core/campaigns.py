@@ -47,7 +47,7 @@ async def get_campaigns(
     account_id = ensure_act_prefix(account_id)
     endpoint = f"{account_id}/campaigns"
     params = {
-        "fields": "id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy,special_ad_categories",
+        "fields": "id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy,special_ad_categories,promoted_object",
         "limit": limit
     }
     
@@ -104,7 +104,7 @@ async def get_campaign_details(campaign_id: str, access_token: Optional[str] = N
     
     endpoint = f"{campaign_id}"
     params = {
-        "fields": "id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy,special_ad_categories,special_ad_category_country,budget_remaining,configured_status"
+        "fields": "id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy,special_ad_categories,special_ad_category_country,budget_remaining,configured_status,promoted_object"
     }
     
     data = await make_api_request(endpoint, access_token, params)
@@ -129,7 +129,8 @@ async def create_campaign(
     spend_cap: Optional[int] = None,
     campaign_budget_optimization: Optional[bool] = None,
     ab_test_control_setups: Optional[List[Dict[str, Any]]] = None,
-    use_adset_level_budgets: bool = False
+    use_adset_level_budgets: bool = False,
+    promoted_object: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Create a new Facebook or Instagram ad campaign in a Meta Ads account. Use this to start
@@ -164,6 +165,9 @@ async def create_campaign(
         campaign_budget_optimization: Whether to enable campaign budget optimization (only used if use_adset_level_budgets=False)
         ab_test_control_setups: Settings for A/B testing (e.g., [{"name":"Creative A", "ad_format":"SINGLE_IMAGE"}])
         use_adset_level_budgets: If True, budgets will be set at the ad set level instead of campaign level (default: False)
+        promoted_object: Optional campaign-level promoted object. For catalog sales this is
+                        usually set on each ad set instead (product_set_id + custom_event_type).
+                        New campaigns default to status=PAUSED.
     """
     # Check required parameters
     if not account_id:
@@ -238,6 +242,9 @@ async def create_campaign(
     
     if ab_test_control_setups:
         params["ab_test_control_setups"] = json.dumps(ab_test_control_setups)
+
+    if promoted_object:
+        params["promoted_object"] = json.dumps(promoted_object)
     
     try:
         data = await make_api_request(endpoint, access_token, params, method="POST")
