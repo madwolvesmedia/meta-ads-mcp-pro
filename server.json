@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "co.pipeboard/meta-ads-mcp",
   "description": "Facebook / Meta Ads automation with AI: analyze performance, test creatives, optimize spend.",
-  "version": "1.1.0+mwm",
+  "version": "1.1.2+mwm",
   "remotes": [
     {
       "type": "streamable-http",

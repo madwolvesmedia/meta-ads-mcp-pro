@@ -6,7 +6,7 @@ This package provides a Meta Ads MCP integration
 
 from meta_ads_mcp.core.server import main
 
-__version__ = "1.1.1+mwm"
+__version__ = "1.1.2+mwm"
 
 __all__ = [
     'get_ad_accounts',
